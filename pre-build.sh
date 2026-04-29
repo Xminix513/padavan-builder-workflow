@@ -1,13 +1,15 @@
 #!/bin/sh
-echo "🔧 Применяем фикс LAN/WAN для MT7621 (Xiaomi Mi3 SPI)..."
+echo "🔧 Фикс портов для MT7620A (Xiaomi Mi3)..."
 
-# Находим все заголовочные файлы плат XIAOMI
 find . -path "*/configs/boards/XIAOMI/*" -name "*.h" -type f | while read -r file; do
-    # Меняем WAN порт на 3 (синий разъём)
-    sed -i 's/\(#define[[:space:]]*BOARD_WAN_PORT[[:space:]]*\)[0-9].*/\13/' "$file"
-    # Меняем LAN порты на 0,1,2 (три оставшихся разъёма)
-    sed -i 's/\(#define[[:space:]]*BOARD_LAN_PORTS[[:space:]]*\)[0-9,].*/\10,1,2/' "$file"
+    # WAN = порт 4, LAN = 0,1,2,3
+    sed -i 's/\(#define[[:space:]]*BOARD_WAN_PORT[[:space:]]*\)[0-9].*/\14/' "$file"
+    sed -i 's/\(#define[[:space:]]*BOARD_LAN_PORTS[[:space:]]*\)[0-9,].*/\10,1,2,3/' "$file"
+    
+    # Если используются битовые маски:
+    sed -i 's/\(#define[[:space:]]*BOARD_WAN_PORT_MASK[[:space:]]*\)0x[0-9A-F].*/\10x10/' "$file"   # 0x10 = порт 4
+    sed -i 's/\(#define[[:space:]]*BOARD_LAN_PORT_MASK[[:space:]]*\)0x[0-9A-F].*/\10x0F/' "$file"   # 0x0F = порты 0-3
+    
     echo "✅ Исправлено: $file"
 done
-
-echo "🎉 Готово! WAN=3, LAN=0,1,2. Запускаю сборку..."
+echo "🎉 Готово! WAN=4, LAN=0,1,2,3"
