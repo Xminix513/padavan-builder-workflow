@@ -1,77 +1,110 @@
 #!/bin/sh
 set -eu
 
-# Путь к конфигу подстрой под свой репозиторий/форк
+echo "[pre-build] start"
+
+# 1. Определяем конфиг устройства, который правим
+# Если у тебя другой путь/имя — поменяй здесь
 CFG="trunk/configs/templates/Keenetic_Lite_3.config"
 
-# Если у тебя в build.config другой путь — замени тут
-[ -f "$CFG" ] || { echo "ERROR: config not found: $CFG" >&2; exit 1; }
-
-# Включаем полезные опции, если они закомментированы
-sed -i \
-  -e 's/^#\(CONFIG_FIRMWARE_INCLUDE_IPSET=y\)/\1/' \
-  -e 's/^#\(CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y\)/\1/' \
-  -e 's/^#\(CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y\)/\1/' \
-  -e 's/^#\(CONFIG_FIRMWARE_INCLUDE_IPV6=y\)/\1/' \
-  "$CFG"
-
-# Если опции уже отсутствуют — добавим их
-for opt in \
-  CONFIG_FIRMWARE_INCLUDE_IPSET=y \
-  CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y \
-  CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y \
-  CONFIG_FIRMWARE_INCLUDE_IPV6=y
-do
-  grep -q "^${opt}$" "$CFG" || echo "$opt" >> "$CFG"
-done
-
-# Проверяем наличие netfilter/iptables модулей в дереве исходников
-need_files=""
-
-check_glob() {
-  pattern="$1"
-  if ! find . -type f \( -name "$pattern" -o -path "*/$pattern" \) | grep -q .; then
-    need_files="$need_files $pattern"
-  fi
-}
-
-check_glob 'xt_NFQUEUE.ko'
-check_glob 'xt_connbytes.ko'
-check_glob 'xt_multiport.ko'
-
-if [ -n "$need_files" ]; then
-  echo "ERROR: required kernel modules not found in source tree:$need_files" >&2
-  exit 1
+if [ ! -f "$CFG" ]; then
+    echo "ERROR: device config not found: $CFG" >&2
+    exit 1
 fi
 
-# Проверяем, что в конфиге есть строки для включения модулей,
-# если они поддерживаются именно через kernel config/defconfig
-required_cfgs="
+echo "[pre-build] using device config: $CFG"
+
+# 2. Гарантируем включение нужных опций из build.config
+NEEDED_FW_OPTS="
+CONFIG_FIRMWARE_INCLUDE_IPSET=y
+CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y
+CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y
+CONFIG_FIRMWARE_INCLUDE_DROPBEAR_FAST_CODE=y
+CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y
+CONFIG_FIRMWARE_INCLUDE_DDNS_SSL=y
+CONFIG_FIRMWARE_INCLUDE_HTTPS=y
+CONFIG_FIRMWARE_INCLUDE_CURL=y
+CONFIG_FIRMWARE_INCLUDE_STUBBY=y
+CONFIG_FIRMWARE_INCLUDE_DOH=y
+CONFIG_FIRMWARE_ENABLE_IPV6=y
+CONFIG_FIRMWARE_INCLUDE_LANG_RU=y
+"
+
+for opt in $NEEDED_FW_OPTS; do
+    key="${opt%=*}"
+    # Если строка закомментирована — раскомментируем
+    sed -i "s/^#\(${opt}\)/\1/" "$CFG" || true
+    # Если всё равно нет — добавим
+    if ! grep -q "^$key=" "$CFG"; then
+        echo "$opt" >> "$CFG"
+        echo "[pre-build] added $opt to $CFG"
+    else
+        # Если есть, но с другим значением — принудительно выставим нужное
+        sed -i "s/^${key}=.*/${opt}/" "$CFG"
+        echo "[pre-build] forced $opt in $CFG"
+    fi
+done
+
+# 3. Проверка наличия модулей xt_NFQUEUE, xt_connbytes, xt_multiport в дереве
+MISSING_FILES=""
+
+check_mod_file() {
+    pattern="$1"
+    if ! find . -type f -name "$pattern" | grep -q . 2>/dev/null; then
+        MISSING_FILES="$MISSING_FILES $pattern"
+    fi
+}
+
+echo "[pre-build] checking for netfilter modules in source tree..."
+check_mod_file "xt_NFQUEUE.c"
+check_mod_file "xt_connbytes.c"
+check_mod_file "xt_multiport.c"
+
+if [ -n "$MISSING_FILES" ]; then
+    echo "ERROR: required netfilter sources not found: $MISSING_FILES" >&2
+    echo "nfqws2-keenetic will very likely not work without these." >&2
+    exit 1
+fi
+
+# 4. Проверка наличия символов в kconfig/defconfig
+REQ_CFG_SYMS="
 CONFIG_NETFILTER_XT_MATCH_CONNBYTES
 CONFIG_NETFILTER_XT_MATCH_MULTIPORT
 CONFIG_NETFILTER_XT_TARGET_NFQUEUE
 "
 
-missing_cfgs=""
-for c in $required_cfgs; do
-  if ! grep -Rqs "^#\?$c[= ]" .; then
-    missing_cfgs="$missing_cfgs $c"
-  fi
+echo "[pre-build] checking for config symbols..."
+MISSING_SYMS=""
+
+for sym in $REQ_CFG_SYMS; do
+    if ! grep -Rqs "^$sym[= ]" trunk linux-3* 2>/dev/null; then
+        MISSING_SYMS="$MISSING_SYMS $sym"
+    fi
 done
 
-if [ -n "$missing_cfgs" ]; then
-  echo "ERROR: required config symbols not found in tree:$missing_cfgs" >&2
-  exit 1
+if [ -n "$MISSING_SYMS" ]; then
+    echo "ERROR: required netfilter config symbols not found:$MISSING_SYMS" >&2
+    echo "You need to add them to kernel config/patches for full nfqws2-keenetic support." >&2
+    exit 1
 fi
 
-# Пытаемся включить, если символы есть в конкретном config-файле
-for c in $required_cfgs; do
-  f=$(grep -Rsl "^#\?$c[= ]" . | head -n 1 || true)
-  if [ -n "${f:-}" ]; then
-    sed -i "s/^#\(${c}=y\)/\1/" "$f" || true
-    grep -q "^${c}=y$" "$f" || echo "${c}=y" >> "$f"
-  fi
+# 5. Попытка включить эти символы в дефолтном конфиге ядра (если присутствуют)
+echo "[pre-build] trying to enable netfilter symbols..."
+
+for sym in $REQ_CFG_SYMS; do
+    # ищем первый файл, где упоминается этот символ
+    CONF_FILE=$(grep -Rsl "^$sym[= ]" trunk linux-3* 2>/dev/null | head -n 1 || true)
+    [ -z "${CONF_FILE:-}" ] && continue
+
+    # Если строка закомментирована как # CONFIG_... is not set — включаем
+    sed -i "s/^# $sym is not set\$/${sym}=y/" "$CONF_FILE" || true
+    # Если есть другая строка — заменим на =y
+    if grep -q "^$sym=" "$CONF_FILE"; then
+        sed -i "s/^${sym}=.*/${sym}=y/" "$CONF_FILE"
+    else
+        echo "${sym}=y" >> "$CONF_FILE"
+    fi
+    echo "[pre-build] enabled ${sym}=y in $CONF_FILE"
 done
 
-echo "pre-build checks passed"
-
+echo "[pre-build] done"
