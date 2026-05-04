@@ -1,30 +1,4 @@
 #!/bin/sh
-set -eu
-
-echo "[pre-build] start"
-
-# 0. Находим конфиг устройства автоматически по PRODUCT_ID
-CFG=""
-if [ -d trunk/configs/templates ]; then
-  CFG=$(grep -Rls 'CONFIG_FIRMWARE_PRODUCT_ID="KN-LITE3"' trunk/configs/templates || true)
-fi
-
-if [ -z "${CFG:-}" ]; then
-  echo "ERROR: device config for KN-LITE3 not found under trunk/configs/templates" >&2
-  echo "Hint: check exact file name and that PRODUCT_ID=\"KN-LITE3\" присутствует в одном из *.config" >&2
-  exit 1
-fi
-
-# Если вдруг нашлось несколько файлов — лучше упасть, чем ковырять не тот
-CFG_COUNT=$(printf "%s\n" "$CFG" | wc -l | tr -d ' ')
-if [ "$CFG_COUNT" -ne 1 ]; then
-  echo "ERROR: multiple configs with PRODUCT_ID=\"KN-LITE3\":" >&2
-  printf "%s\n" "$CFG" >&2
-  exit 1
-fi
-
-CFG=$(printf "%s\n" "$CFG" | head -n 1)
-echo "[pre-build] using device config: $CFG"
 
 # 1. Гарантируем включение нужных опций в конфиге устройства
 NEEDED_FW_OPTS="
