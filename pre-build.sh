@@ -3,18 +3,30 @@ set -eu
 
 echo "[pre-build] start"
 
-# 1. Определяем конфиг устройства, который правим
-# Если у тебя другой путь/имя — поменяй здесь
-CFG="trunk/configs/templates/Keenetic_Lite_3.config"
-
-if [ ! -f "$CFG" ]; then
-    echo "ERROR: device config not found: $CFG" >&2
-    exit 1
+# 0. Находим конфиг устройства автоматически по PRODUCT_ID
+CFG=""
+if [ -d trunk/configs/templates ]; then
+  CFG=$(grep -Rls 'CONFIG_FIRMWARE_PRODUCT_ID="KN-LITE3"' trunk/configs/templates || true)
 fi
 
+if [ -z "${CFG:-}" ]; then
+  echo "ERROR: device config for KN-LITE3 not found under trunk/configs/templates" >&2
+  echo "Hint: check exact file name and that PRODUCT_ID=\"KN-LITE3\" присутствует в одном из *.config" >&2
+  exit 1
+fi
+
+# Если вдруг нашлось несколько файлов — лучше упасть, чем ковырять не тот
+CFG_COUNT=$(printf "%s\n" "$CFG" | wc -l | tr -d ' ')
+if [ "$CFG_COUNT" -ne 1 ]; then
+  echo "ERROR: multiple configs with PRODUCT_ID=\"KN-LITE3\":" >&2
+  printf "%s\n" "$CFG" >&2
+  exit 1
+fi
+
+CFG=$(printf "%s\n" "$CFG" | head -n 1)
 echo "[pre-build] using device config: $CFG"
 
-# 2. Гарантируем включение нужных опций из build.config
+# 1. Гарантируем включение нужных опций в конфиге устройства
 NEEDED_FW_OPTS="
 CONFIG_FIRMWARE_INCLUDE_IPSET=y
 CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y
@@ -32,20 +44,18 @@ CONFIG_FIRMWARE_INCLUDE_LANG_RU=y
 
 for opt in $NEEDED_FW_OPTS; do
     key="${opt%=*}"
-    # Если строка закомментирована — раскомментируем
+    # раскомментируем, если есть закомментированная строка
     sed -i "s/^#\(${opt}\)/\1/" "$CFG" || true
-    # Если всё равно нет — добавим
     if ! grep -q "^$key=" "$CFG"; then
         echo "$opt" >> "$CFG"
         echo "[pre-build] added $opt to $CFG"
     else
-        # Если есть, но с другим значением — принудительно выставим нужное
         sed -i "s/^${key}=.*/${opt}/" "$CFG"
         echo "[pre-build] forced $opt in $CFG"
     fi
 done
 
-# 3. Проверка наличия модулей xt_NFQUEUE, xt_connbytes, xt_multiport в дереве
+# 2. Проверка наличия модулей xt_NFQUEUE, xt_connbytes, xt_multiport в исходниках
 MISSING_FILES=""
 
 check_mod_file() {
@@ -61,23 +71,23 @@ check_mod_file "xt_connbytes.c"
 check_mod_file "xt_multiport.c"
 
 if [ -n "$MISSING_FILES" ]; then
-    echo "ERROR: required netfilter sources not found: $MISSING_FILES" >&2
+    echo "ERROR: required netfilter sources not found:$MISSING_FILES" >&2
     echo "nfqws2-keenetic will very likely not work without these." >&2
     exit 1
 fi
 
-# 4. Проверка наличия символов в kconfig/defconfig
+# 3. Проверка наличия нужных Kconfig-символов
 REQ_CFG_SYMS="
 CONFIG_NETFILTER_XT_MATCH_CONNBYTES
 CONFIG_NETFILTER_XT_MATCH_MULTIPORT
 CONFIG_NETFILTER_XT_TARGET_NFQUEUE
 "
 
-echo "[pre-build] checking for config symbols..."
+echo "[pre-build] checking for config symbols in kernel tree..."
 MISSING_SYMS=""
 
 for sym in $REQ_CFG_SYMS; do
-    if ! grep -Rqs "^$sym[= ]" trunk linux-3* 2>/dev/null; then
+    if ! grep -Rqs "^$sym[= ]" linux-3* trunk 2>/dev/null; then
         MISSING_SYMS="$MISSING_SYMS $sym"
     fi
 done
@@ -88,18 +98,17 @@ if [ -n "$MISSING_SYMS" ]; then
     exit 1
 fi
 
-# 5. Попытка включить эти символы в дефолтном конфиге ядра (если присутствуют)
+# 4. Пытаемся включить эти символы в первом попавшемся конфиге ядра
 echo "[pre-build] trying to enable netfilter symbols..."
 
 for sym in $REQ_CFG_SYMS; do
-    # ищем первый файл, где упоминается этот символ
-    CONF_FILE=$(grep -Rsl "^$sym[= ]" trunk linux-3* 2>/dev/null | head -n 1 || true)
+    CONF_FILE=$(grep -Rsl "^$sym[= ]" linux-3* trunk 2>/dev/null | head -n 1 || true)
     [ -z "${CONF_FILE:-}" ] && continue
 
-    # Если строка закомментирована как # CONFIG_... is not set — включаем
+    # # CONFIG_... is not set -> включаем
     sed -i "s/^# $sym is not set\$/${sym}=y/" "$CONF_FILE" || true
-    # Если есть другая строка — заменим на =y
-    if grep -q "^$sym=" "$CONF_FILE"; then
+
+    if grep -q "^${sym}=" "$CONF_FILE"; then
         sed -i "s/^${sym}=.*/${sym}=y/" "$CONF_FILE"
     else
         echo "${sym}=y" >> "$CONF_FILE"
